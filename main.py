@@ -7,9 +7,12 @@ Built with FastAPI and yfinance library.
 
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import yfinance as yf
 import pandas as pd
 
@@ -20,6 +23,12 @@ app = FastAPI(
                 "news, dividends, earnings, market movers, sectors, crypto, and forex data.",
     version="2.0.0",
 )
+
+# Rate limiter setup
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 @app.get("/")
 def root():
@@ -49,6 +58,7 @@ def root():
         ]
     }
 
+
 # CORS middleware - allow all origins
 app.add_middleware(
     CORSMiddleware,
@@ -75,12 +85,27 @@ def validate_ticker(ticker: str) -> str:
 # HEALTH
 # ─────────────────────────────────────────────
 
-@app.get("/health", tags=["Health"])
-async def health_check():
+@app.get("/health", tags=["Health"], responses={
+    200: {
+        "description": "API is healthy and running",
+        "content": {
+            "application/json": {
+                "example": {
+                    "status": "ok",
+                    "timestamp": "2026-03-23T10:30:00+00:00"
+                }
+            }
+        }
+    }
+})
+@limiter.limit("60/minute")
+async def health_check(request: Request):
     """
     Health check endpoint.
 
     Returns the current UTC timestamp and status to verify the API is running.
+
+    Example: /health
     """
     try:
         return {
@@ -95,12 +120,39 @@ async def health_check():
 # EXISTING STOCK ENDPOINTS
 # ─────────────────────────────────────────────
 
-@app.get("/stock/{ticker}/quote", tags=["Stock Data"])
-async def get_stock_quote(ticker: str, response: Response):
+@app.get("/stock/{ticker}/quote", tags=["Stock Data"], responses={
+    200: {
+        "description": "Real-time stock quote for a given ticker",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "price": 178.52,
+                    "open": 177.25,
+                    "high": 179.38,
+                    "low": 176.80,
+                    "volume": 58234500,
+                    "market_cap": 2800000000000,
+                    "pe_ratio": 28.45,
+                    "52_week_high": 199.62,
+                    "52_week_low": 164.08,
+                    "currency": "USD"
+                }
+            }
+        }
+    }
+})
+@limiter.limit("30/minute")
+async def get_stock_quote(request: Request, ticker: str):
     """
     Get real-time stock quote for a given ticker.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+
     Returns price, open, high, low, volume, market_cap, pe_ratio, 52-week high/low, currency.
+
+    Example: /stock/AAPL/quote
     """
     ticker = validate_ticker(ticker)
     try:
@@ -132,15 +184,54 @@ async def get_stock_quote(ticker: str, response: Response):
         raise HTTPException(status_code=500, detail=f"Error fetching quote: {str(e)}")
 
 
-@app.get("/stock/{ticker}/history", tags=["Stock Data"])
+@app.get("/stock/{ticker}/history", tags=["Stock Data"], responses={
+    200: {
+        "description": "Historical OHLCV data for a stock",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "period": "1mo",
+                    "interval": "1d",
+                    "data": [
+                        {
+                            "date": "2026-02-23T00:00:00",
+                            "open": 175.50,
+                            "high": 177.82,
+                            "low": 175.10,
+                            "close": 177.25,
+                            "volume": 45230000
+                        },
+                        {
+                            "date": "2026-02-24T00:00:00",
+                            "open": 177.25,
+                            "high": 179.38,
+                            "low": 176.80,
+                            "close": 178.52,
+                            "volume": 58234500
+                        }
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("20/minute")
 async def get_stock_history(
+    request: Request,
     ticker: str,
     period: str = Query(default="1mo", description="Time period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max"),
     interval: str = Query(default="1d", description="Data interval: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo"),
-    response: Response = None
 ):
     """
     Get historical OHLCV data for a stock.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+        period: Time period for historical data (default: 1mo)
+        interval: Data interval (default: 1d)
+
+    Example: /stock/AAPL/history?period=1mo&interval=1d
     """
     ticker = validate_ticker(ticker)
     try:
@@ -177,10 +268,36 @@ async def get_stock_history(
         raise HTTPException(status_code=500, detail=f"Error fetching history: {str(e)}")
 
 
-@app.get("/stock/{ticker}/info", tags=["Stock Data"])
-async def get_stock_info(ticker: str, response: Response):
+@app.get("/stock/{ticker}/info", tags=["Stock Data"], responses={
+    200: {
+        "description": "Company information and metadata for a stock",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "company_name": "Apple Inc.",
+                    "sector": "Technology",
+                    "industry": "Consumer Electronics",
+                    "country": "United States",
+                    "website": "https://www.apple.com",
+                    "employees": 164000,
+                    "description": "Apple Inc. designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories worldwide...",
+                    "exchange": "NASDAQ",
+                    "dividend_yield": 0.0052
+                }
+            }
+        }
+    }
+})
+@limiter.limit("30/minute")
+async def get_stock_info(request: Request, ticker: str):
     """
     Get company information and metadata for a stock.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+
+    Example: /stock/AAPL/info
     """
     ticker = validate_ticker(ticker)
     try:
@@ -208,10 +325,43 @@ async def get_stock_info(ticker: str, response: Response):
         raise HTTPException(status_code=500, detail=f"Error fetching info: {str(e)}")
 
 
-@app.get("/stock/{ticker}/recommendations", tags=["Stock Data"])
-async def get_stock_recommendations(ticker: str, response: Response):
+@app.get("/stock/{ticker}/recommendations", tags=["Stock Data"], responses={
+    200: {
+        "description": "Latest analyst recommendations for a stock",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "recommendations": [
+                        {
+                            "date": "2026-03-20T00:00:00",
+                            "firm": "Morgan Stanley",
+                            "to_grade": "Overweight",
+                            "from_grade": "Equal-Weight",
+                            "action": "upgrade"
+                        },
+                        {
+                            "date": "2026-03-18T00:00:00",
+                            "firm": "Goldman Sachs",
+                            "to_grade": "Buy",
+                            "from_grade": "Neutral",
+                            "action": "main"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("20/minute")
+async def get_stock_recommendations(request: Request, ticker: str):
     """
     Get latest analyst recommendations for a stock.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+
+    Example: /stock/AAPL/recommendations
     """
     ticker = validate_ticker(ticker)
     try:
@@ -239,13 +389,58 @@ async def get_stock_recommendations(ticker: str, response: Response):
         raise HTTPException(status_code=500, detail=f"Error fetching recommendations: {str(e)}")
 
 
-@app.get("/stocks/compare", tags=["Stock Data"])
+@app.get("/stocks/compare", tags=["Stock Data"], responses={
+    200: {
+        "description": "Side-by-side comparison of multiple stocks",
+        "content": {
+            "application/json": {
+                "example": {
+                    "stocks": [
+                        {
+                            "ticker": "AAPL",
+                            "price": 178.52,
+                            "market_cap": 2800000000000,
+                            "pe_ratio": 28.45,
+                            "52_week_high": 199.62,
+                            "52_week_low": 164.08,
+                            "currency": "USD"
+                        },
+                        {
+                            "ticker": "MSFT",
+                            "price": 415.30,
+                            "market_cap": 3080000000000,
+                            "pe_ratio": 35.20,
+                            "52_week_high": 430.82,
+                            "52_week_low": 362.90,
+                            "currency": "USD"
+                        },
+                        {
+                            "ticker": "TSLA",
+                            "price": 175.20,
+                            "market_cap": 558000000000,
+                            "pe_ratio": 42.80,
+                            "52_week_high": 278.98,
+                            "52_week_low": 138.80,
+                            "currency": "USD"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("10/minute")
 async def compare_stocks(
+    request: Request,
     tickers: str = Query(..., description="Comma-separated ticker symbols (max 5, e.g. AAPL,MSFT,TSLA)"),
-    response: Response = None
 ):
     """
     Compare multiple stocks side by side.
+
+    Args:
+        tickers: Comma-separated ticker symbols (max 5, e.g., AAPL,MSFT,TSLA)
+
+    Example: /stocks/compare?tickers=AAPL,MSFT,TSLA
     """
     ticker_list = [t.strip().upper() for t in tickers.split(",")]
 
@@ -292,12 +487,49 @@ async def compare_stocks(
 # NEW ENDPOINTS
 # ─────────────────────────────────────────────
 
-@app.get("/stock/{ticker}/financials", tags=["Stock Data"])
-async def get_stock_financials(ticker: str, response: Response):
+@app.get("/stock/{ticker}/financials", tags=["Stock Data"], responses={
+    200: {
+        "description": "Financial statements for a stock (income, balance sheet, cash flow)",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "income_statement": {
+                        "Total Revenue": 394328000000,
+                        "Net Income": 97099000000,
+                        "Gross Profit": 170882000000,
+                        "Operating Income": 119437000000,
+                        "EPS": 6.13
+                    },
+                    "balance_sheet": {
+                        "Total Assets": 352583000000,
+                        "Total Liabilities": 290437000000,
+                        "Total Equity": 62146000000,
+                        "Cash": 62699000000,
+                        "Long Term Debt": 98959000000
+                    },
+                    "cash_flow": {
+                        "Operating Cash Flow": 110056000000,
+                        "Capital Expenditure": -11758000000,
+                        "Free Cash Flow": 98298000000,
+                        "Dividends Paid": -14876000000
+                    }
+                }
+            }
+        }
+    }
+})
+@limiter.limit("10/minute")
+async def get_stock_financials(request: Request, ticker: str):
     """
     Get financial statements for a stock.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+
     Returns latest annual income statement, balance sheet, and cash flow data.
+
+    Example: /stock/AAPL/financials
     """
     ticker = validate_ticker(ticker)
     try:
@@ -328,16 +560,51 @@ async def get_stock_financials(ticker: str, response: Response):
         raise HTTPException(status_code=500, detail=f"Error fetching financials: {str(e)}")
 
 
-@app.get("/stock/{ticker}/news", tags=["Stock Data"])
+@app.get("/stock/{ticker}/news", tags=["Stock Data"], responses={
+    200: {
+        "description": "Latest news articles for a stock",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "count": 2,
+                    "news": [
+                        {
+                            "title": "Apple Reports Record Q1 Revenue, Services Growth Continues",
+                            "publisher": "Bloomberg",
+                            "link": "https://example.com/apple-news-1",
+                            "published_at": "2026-03-22T14:30:00+00:00",
+                            "type": "Article"
+                        },
+                        {
+                            "title": "Apple Announces New AI Features for iPhone",
+                            "publisher": "Reuters",
+                            "link": "https://example.com/apple-news-2",
+                            "published_at": "2026-03-21T09:15:00+00:00",
+                            "type": "Article"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("20/minute")
 async def get_stock_news(
+    request: Request,
     ticker: str,
     limit: int = Query(default=10, ge=1, le=50, description="Number of news articles to return (max 50)"),
-    response: Response = None
 ):
     """
     Get latest news articles for a stock.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+        limit: Number of news articles to return (default: 10, max: 50)
+
     Returns title, publisher, link, and publish time for each article.
+
+    Example: /stock/AAPL/news?limit=5
     """
     ticker = validate_ticker(ticker)
     try:
@@ -365,16 +632,54 @@ async def get_stock_news(
         raise HTTPException(status_code=500, detail=f"Error fetching news: {str(e)}")
 
 
-@app.get("/stock/{ticker}/indicators", tags=["Stock Data"])
+@app.get("/stock/{ticker}/indicators", tags=["Stock Data"], responses={
+    200: {
+        "description": "Technical indicators (SMA, EMA, RSI, MACD, Bollinger Bands)",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "period": "6mo",
+                    "current_price": 178.52,
+                    "moving_averages": {
+                        "sma_20": 175.82,
+                        "sma_50": 172.45,
+                        "sma_200": 168.30,
+                        "ema_12": 178.25,
+                        "ema_26": 176.80
+                    },
+                    "macd": {
+                        "macd": 2.45,
+                        "signal": 1.82,
+                        "histogram": 0.63
+                    },
+                    "rsi_14": 62.35,
+                    "bollinger_bands": {
+                        "upper": 182.15,
+                        "middle": 175.82,
+                        "lower": 169.49
+                    }
+                }
+            }
+        }
+    }
+})
+@limiter.limit("10/minute")
 async def get_technical_indicators(
+    request: Request,
     ticker: str,
     period: str = Query(default="6mo", description="Time period for calculation: 3mo, 6mo, 1y, 2y"),
-    response: Response = None
 ):
     """
     Get technical indicators for a stock.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+        period: Time period for calculation (default: 6mo)
+
     Returns SMA (20, 50, 200), EMA (12, 26), RSI (14), MACD, and Bollinger Bands.
+
+    Example: /stock/AAPL/indicators?period=6mo
     """
     ticker = validate_ticker(ticker)
     try:
@@ -445,16 +750,44 @@ async def get_technical_indicators(
         raise HTTPException(status_code=500, detail=f"Error calculating indicators: {str(e)}")
 
 
-@app.get("/stock/{ticker}/dividends", tags=["Stock Data"])
+@app.get("/stock/{ticker}/dividends", tags=["Stock Data"], responses={
+    200: {
+        "description": "Dividend history and yield information",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "dividend_yield": 0.0052,
+                    "annual_dividend_rate": 0.96,
+                    "ex_dividend_date": "2026-02-14",
+                    "payout_ratio": 0.15,
+                    "history": [
+                        {"date": "2026-02-14", "amount": 0.24},
+                        {"date": "2025-11-14", "amount": 0.24},
+                        {"date": "2025-08-15", "amount": 0.24},
+                        {"date": "2025-05-16", "amount": 0.24}
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("20/minute")
 async def get_stock_dividends(
+    request: Request,
     ticker: str,
     limit: int = Query(default=20, ge=1, le=100, description="Number of dividend records to return"),
-    response: Response = None
 ):
     """
     Get dividend history for a stock.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+        limit: Number of dividend records to return (default: 20, max: 100)
+
     Returns dividend payment dates and amounts, plus current yield and annual rate.
+
+    Example: /stock/AAPL/dividends?limit=10
     """
     ticker = validate_ticker(ticker)
     try:
@@ -486,12 +819,43 @@ async def get_stock_dividends(
         raise HTTPException(status_code=500, detail=f"Error fetching dividends: {str(e)}")
 
 
-@app.get("/stock/{ticker}/earnings", tags=["Stock Data"])
-async def get_stock_earnings(ticker: str, response: Response):
+@app.get("/stock/{ticker}/earnings", tags=["Stock Data"], responses={
+    200: {
+        "description": "Earnings data including EPS, revenue, and upcoming earnings dates",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "eps_trailing_12m": 6.13,
+                    "eps_forward": 7.25,
+                    "pe_trailing": 28.45,
+                    "pe_forward": 24.25,
+                    "earnings_growth": 0.11,
+                    "revenue_growth": 0.04,
+                    "annual_earnings": [
+                        {"year": "2025", "revenue": 394328000000, "earnings": 97099000000},
+                        {"year": "2024", "revenue": 385606000000, "earnings": 97099000000}
+                    ],
+                    "quarterly_earnings": [
+                        {"quarter": "2026-Q1", "revenue": 124300000000, "earnings": 36308000000},
+                        {"quarter": "2025-Q4", "revenue": 94930000000, "earnings": 24356000000}
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("10/minute")
+async def get_stock_earnings(request: Request, ticker: str):
     """
     Get earnings data for a stock.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+
     Returns annual and quarterly EPS, revenue, and upcoming earnings date.
+
+    Example: /stock/AAPL/earnings
     """
     ticker = validate_ticker(ticker)
     try:
@@ -540,12 +904,43 @@ async def get_stock_earnings(ticker: str, response: Response):
         raise HTTPException(status_code=500, detail=f"Error fetching earnings: {str(e)}")
 
 
-@app.get("/stock/{ticker}/analysts", tags=["Stock Data"])
-async def get_analyst_targets(ticker: str, response: Response):
+@app.get("/stock/{ticker}/analysts", tags=["Stock Data"], responses={
+    200: {
+        "description": "Analyst price targets and ratings summary",
+        "content": {
+            "application/json": {
+                "example": {
+                    "ticker": "AAPL",
+                    "current_price": 178.52,
+                    "target_mean_price": 210.25,
+                    "target_low_price": 170.00,
+                    "target_high_price": 250.00,
+                    "target_median_price": 205.00,
+                    "recommendation": "buy",
+                    "analyst_count": 42,
+                    "ratings": {
+                        "strong_buy": 15,
+                        "buy": 20,
+                        "hold": 6,
+                        "sell": 1,
+                        "strong_sell": 0
+                    }
+                }
+            }
+        }
+    }
+})
+@limiter.limit("20/minute")
+async def get_analyst_targets(request: Request, ticker: str):
     """
     Get analyst price targets and ratings summary for a stock.
 
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT, TSLA)
+
     Returns mean/low/high price targets and buy/hold/sell counts.
+
+    Example: /stock/AAPL/analysts
     """
     ticker = validate_ticker(ticker)
     try:
@@ -582,12 +977,40 @@ async def get_analyst_targets(ticker: str, response: Response):
 # MARKET ENDPOINTS
 # ─────────────────────────────────────────────
 
-@app.get("/market/movers", tags=["Market Data"])
-async def get_market_movers(response: Response = None):
+@app.get("/market/movers", tags=["Market Data"], responses={
+    200: {
+        "description": "Top market gainers and losers",
+        "content": {
+            "application/json": {
+                "example": {
+                    "timestamp": "2026-03-23T10:30:00+00:00",
+                    "top_gainers": [
+                        {"ticker": "NVDA", "price": 875.50, "change_pct": 5.82, "volume": 42500000},
+                        {"ticker": "AMD", "price": 185.20, "change_pct": 4.65, "volume": 52100000},
+                        {"ticker": "TSLA", "price": 175.20, "change_pct": 3.92, "volume": 98200000},
+                        {"ticker": "META", "price": 505.30, "change_pct": 2.85, "volume": 18500000},
+                        {"ticker": "NFLX", "price": 685.40, "change_pct": 2.45, "volume": 4200000}
+                    ],
+                    "top_losers": [
+                        {"ticker": "PYPL", "price": 58.20, "change_pct": -4.85, "volume": 22500000},
+                        {"ticker": "INTC", "price": 42.30, "change_pct": -3.65, "volume": 38500000},
+                        {"ticker": "MRK", "price": 118.50, "change_pct": -2.15, "volume": 8500000},
+                        {"ticker": "VZ", "price": 38.40, "change_pct": -1.85, "volume": 18200000},
+                        {"ticker": "MA", "price": 485.20, "change_pct": -1.25, "volume": 3200000}
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("5/minute")
+async def get_market_movers(request: Request):
     """
     Get top market movers - gainers and losers of the day.
 
     Tracks a curated list of large-cap stocks and returns top 5 gainers and losers by % change.
+
+    Example: /market/movers
     """
     # Curated list of large-cap tickers to scan
     watchlist = [
@@ -625,12 +1048,33 @@ async def get_market_movers(response: Response = None):
         raise HTTPException(status_code=500, detail=f"Error fetching movers: {str(e)}")
 
 
-@app.get("/market/summary", tags=["Market Data"])
-async def get_market_summary(response: Response = None):
+@app.get("/market/summary", tags=["Market Data"], responses={
+    200: {
+        "description": "Overall market summary for major indices",
+        "content": {
+            "application/json": {
+                "example": {
+                    "timestamp": "2026-03-23T10:30:00+00:00",
+                    "indices": [
+                        {"name": "S&P 500", "symbol": "^GSPC", "price": 5428.50, "change_pct": 0.85, "day_high": 5445.20, "day_low": 5398.30},
+                        {"name": "NASDAQ", "symbol": "^IXIC", "price": 17892.30, "change_pct": 1.25, "day_high": 17950.80, "day_low": 17820.40},
+                        {"name": "Dow Jones", "symbol": "^DJI", "price": 42850.20, "change_pct": 0.45, "day_high": 42980.50, "day_low": 42750.30},
+                        {"name": "Russell 2000", "symbol": "^RUT", "price": 2085.40, "change_pct": -0.35, "day_high": 2095.80, "day_low": 2078.20},
+                        {"name": "VIX", "symbol": "^VIX", "price": 15.80, "change_pct": -2.85, "day_high": 16.45, "day_low": 15.60}
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("10/minute")
+async def get_market_summary(request: Request):
     """
     Get overall market summary for major indices.
 
     Returns current price and daily change for S&P 500, NASDAQ, Dow Jones, Russell 2000, and VIX.
+
+    Example: /market/summary
     """
     indices = {
         "S&P 500": "^GSPC",
@@ -667,12 +1111,33 @@ async def get_market_summary(response: Response = None):
         raise HTTPException(status_code=500, detail=f"Error fetching market summary: {str(e)}")
 
 
-@app.get("/market/sectors", tags=["Market Data"])
-async def get_sector_performance(response: Response = None):
+@app.get("/market/sectors", tags=["Market Data"], responses={
+    200: {
+        "description": "Performance of major market sectors",
+        "content": {
+            "application/json": {
+                "example": {
+                    "timestamp": "2026-03-23T10:30:00+00:00",
+                    "sectors": [
+                        {"sector": "Technology", "etf": "XLK", "price": 245.80, "change_pct": 1.85},
+                        {"sector": "Healthcare", "etf": "XLV", "price": 142.30, "change_pct": 0.92},
+                        {"sector": "Financials", "etf": "XLF", "price": 42.50, "change_pct": 0.45},
+                        {"sector": "Energy", "etf": "XLE", "price": 88.20, "change_pct": -0.35},
+                        {"sector": "Consumer Discretionary", "etf": "XLY", "price": 182.40, "change_pct": 1.25}
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("10/minute")
+async def get_sector_performance(request: Request):
     """
     Get performance of major market sectors.
 
     Returns daily % change for 11 GICS sectors using sector ETFs.
+
+    Example: /market/sectors
     """
     sectors = {
         "Technology": "XLK",
@@ -719,8 +1184,29 @@ async def get_sector_performance(response: Response = None):
 # CRYPTO & FOREX
 # ─────────────────────────────────────────────
 
-@app.get("/crypto/{symbol}/quote", tags=["Crypto & Forex"])
-async def get_crypto_quote(symbol: str, response: Response = None):
+@app.get("/crypto/{symbol}/quote", tags=["Crypto & Forex"], responses={
+    200: {
+        "description": "Real-time cryptocurrency quote",
+        "content": {
+            "application/json": {
+                "example": {
+                    "symbol": "BTC",
+                    "pair": "BTC-USD",
+                    "price_usd": 67542.30,
+                    "open": 66850.00,
+                    "day_high": 68250.00,
+                    "day_low": 66200.00,
+                    "volume_24h": 28500000000,
+                    "market_cap": 1320000000000,
+                    "52_week_high": 108240.00,
+                    "52_week_low": 38250.00
+                }
+            }
+        }
+    }
+})
+@limiter.limit("30/minute")
+async def get_crypto_quote(request: Request, symbol: str):
     """
     Get real-time cryptocurrency quote.
 
@@ -728,6 +1214,8 @@ async def get_crypto_quote(symbol: str, response: Response = None):
         symbol: Crypto symbol (e.g., BTC, ETH, SOL, BNB)
 
     Returns price, volume, market cap, and 24h change.
+
+    Example: /crypto/BTC/quote
     """
     symbol = symbol.upper().strip()
     ticker_symbol = f"{symbol}-USD"
@@ -756,8 +1244,27 @@ async def get_crypto_quote(symbol: str, response: Response = None):
         raise HTTPException(status_code=500, detail=f"Error fetching crypto quote: {str(e)}")
 
 
-@app.get("/forex/{pair}/quote", tags=["Crypto & Forex"])
-async def get_forex_quote(pair: str, response: Response = None):
+@app.get("/forex/{pair}/quote", tags=["Crypto & Forex"], responses={
+    200: {
+        "description": "Real-time forex exchange rate",
+        "content": {
+            "application/json": {
+                "example": {
+                    "pair": "EURUSD",
+                    "base_currency": "EUR",
+                    "quote_currency": "USD",
+                    "rate": 1.0845,
+                    "open": 1.0820,
+                    "day_high": 1.0875,
+                    "day_low": 1.0810,
+                    "previous_close": 1.0825
+                }
+            }
+        }
+    }
+})
+@limiter.limit("30/minute")
+async def get_forex_quote(request: Request, pair: str):
     """
     Get real-time forex exchange rate.
 
@@ -765,6 +1272,8 @@ async def get_forex_quote(pair: str, response: Response = None):
         pair: Currency pair (e.g., EURUSD, GBPUSD, USDJPY, INRUSD)
 
     Returns current rate, day high/low, and open.
+
+    Example: /forex/EURUSD/quote
     """
     pair = pair.upper().strip()
     if len(pair) != 6:
@@ -801,10 +1310,32 @@ async def get_forex_quote(pair: str, response: Response = None):
 # SEARCH
 # ─────────────────────────────────────────────
 
-@app.get("/stock/search", tags=["Stock Data"])
+@app.get("/stock/search", tags=["Stock Data"], responses={
+    200: {
+        "description": "Search for stocks by ticker or company name",
+        "content": {
+            "application/json": {
+                "example": {
+                    "query": "Apple",
+                    "results": [
+                        {
+                            "ticker": "AAPL",
+                            "company_name": "Apple Inc.",
+                            "price": 178.52,
+                            "exchange": "NASDAQ",
+                            "sector": "Technology",
+                            "currency": "USD"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+})
+@limiter.limit("20/minute")
 async def search_stocks(
+    request: Request,
     q: str = Query(..., description="Search query - company name or ticker symbol"),
-    response: Response = None
 ):
     """
     Search for stocks by ticker or company name.
@@ -813,6 +1344,8 @@ async def search_stocks(
         q: Search query (e.g., 'Apple', 'AAPL', 'Tesla')
 
     Returns matching stocks with basic quote data.
+
+    Example: /stock/search?q=AAPL
     """
     if len(q.strip()) < 1:
         raise HTTPException(status_code=400, detail="Search query cannot be empty")
