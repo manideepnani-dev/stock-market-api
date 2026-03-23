@@ -20,6 +20,22 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.get("/")
+def root():
+    return {
+        "name": "Stock Market Data API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": [
+            "/health",
+            "/stock/{ticker}/quote",
+            "/stock/{ticker}/history",
+            "/stock/{ticker}/info",
+            "/stock/{ticker}/recommendations",
+            "/stocks/compare"
+        ]
+    }
+
 # CORS middleware - allow all origins
 app.add_middleware(
     CORSMiddleware,
